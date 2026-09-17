@@ -102,6 +102,11 @@ says `400 Backlogs are not supported on this board`.
 The project key is quoted in the JQL, since a key like `AND` is legal and would
 otherwise be read as an operator.
 
+Tickets are sorted locally, by project and then by number, rather than left to
+whatever produced the list. JQL's `ORDER BY key` already does that, but the
+backlog arrives from the agile endpoint in board-rank order and was collected
+into a map keyed by the whole key — which put `GDE-102` ahead of `GDE-11`.
+
 `show` reads `/rest/api/3/issue/<KEY>` and pages
 `/rest/api/3/issue/<KEY>/comment` separately — comments arrive under `comments`
 rather than `values` and report a `total` instead of an `isLast`, which is why

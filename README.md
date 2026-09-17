@@ -147,6 +147,9 @@ With a sprint id, only that sprint's tickets; with `backlog`, what's on the
 project's boards and in no sprint; without either, the whole project — which is
 what a Kanban project needs. `list-sprints` is where the ids come from.
 
+Sorted by project and then by ticket number — 11 before 102, not the other way
+round.
+
 `PARENT` is the readable key of the ticket above this one: the story a sub-task
 belongs to, or, in a team-managed project, the epic. Finished work is dimmed and
 work in progress picked out, by status *category*, so it holds up against custom

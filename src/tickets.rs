@@ -70,11 +70,16 @@ pub async fn list(instance: &Instance, project: &str, sprint: Option<&str>, opts
             .map_err(|e| format!("sprint {id}: {e}"))?;
     }
 
-    let tickets = match scope {
+    let mut tickets = match scope {
         Scope::Backlog => backlog(&session, &instance.url, &key, opts).await?,
         Scope::Project => search(&session, &instance.url, &key, None, opts).await?,
         Scope::Sprint(id) => search(&session, &instance.url, &key, Some(id), opts).await?,
     };
+    // Sorted here rather than left to whatever produced the list. JQL's
+    // ORDER BY key already does this, but the backlog comes from the agile
+    // endpoint in board-rank order and was collected by key, which put GDE-102
+    // ahead of GDE-11.
+    tickets.sort_by(|a, b| number(&a.key).cmp(&number(&b.key)));
 
     if opts.json {
         let out: Vec<Value> = tickets
@@ -157,6 +162,16 @@ fn project_url(base: &str, key: &str) -> String {
 
 fn sprint_url(base: &str, id: u64) -> String {
     format!("{base}/rest/agile/1.0/sprint/{id}")
+}
+
+// A ticket key in the order a ticket number means: by project, then by number
+// and not by the digits it happens to be written with. A key that isn't shaped
+// like one sorts last rather than sorting wrongly.
+fn number(key: &str) -> (&str, u64) {
+    match key.rsplit_once('-') {
+        Some((project, number)) => (project, number.parse().unwrap_or(u64::MAX)),
+        None => (key, u64::MAX),
+    }
 }
 
 fn ticket_from(v: &Value) -> Option<Ticket> {
@@ -291,6 +306,32 @@ mod tests {
     fn the_validation_urls_are_built_off_the_configured_base() {
         assert_eq!(project_url("https://x.atlassian.net", "BUA"), "https://x.atlassian.net/rest/api/3/project/BUA");
         assert_eq!(sprint_url("https://x.atlassian.net", 233), "https://x.atlassian.net/rest/agile/1.0/sprint/233");
+    }
+
+    // The bug this fixes: the backlog was collected into a map keyed by the
+    // whole key, so GDE-102 came before GDE-11.
+    #[test]
+    fn tickets_sort_by_number_and_not_by_its_digits() {
+        let mut keys = ["GDE-11", "GDE-102", "GDE-2", "GDE-10", "GDE-1"];
+        keys.sort_by(|a, b| number(a).cmp(&number(b)));
+        assert_eq!(keys, ["GDE-1", "GDE-2", "GDE-10", "GDE-11", "GDE-102"]);
+    }
+
+    #[test]
+    fn the_project_comes_before_the_number() {
+        let mut keys = ["BUA-2", "ADS-10", "BUA-1", "ADS-2"];
+        keys.sort_by(|a, b| number(a).cmp(&number(b)));
+        assert_eq!(keys, ["ADS-2", "ADS-10", "BUA-1", "BUA-2"]);
+    }
+
+    // Nothing here produces such a key, but sorting must not reorder wrongly if
+    // something ever does.
+    #[test]
+    fn a_key_that_is_not_shaped_like_one_sorts_last_within_its_project() {
+        let mut keys = ["GDE-x", "GDE-2", "GDE-10"];
+        keys.sort_by(|a, b| number(a).cmp(&number(b)));
+        assert_eq!(keys, ["GDE-2", "GDE-10", "GDE-x"]);
+        assert_eq!(number("nodash"), ("nodash", u64::MAX));
     }
 
     #[test]
