@@ -113,6 +113,7 @@ myjira list-projects --org=gd       # …of that org instead
 myjira list-sprints BUA             # the sprints of that project's boards
 myjira list-tickets BUA             # every ticket in the project
 myjira list-tickets BUA 233         # only the ones in that sprint
+myjira show BTE-915                 # one ticket in full
 myjira list-projects --json         # the same as JSON
 myjira --help                       # all flags
 ```
@@ -197,6 +198,76 @@ belongs to, or, in a team-managed project, the epic. A ticket at the top of the
 hierarchy shows `-`, and the column is left out entirely when nothing in the
 result has a parent.
 
+### show &lt;TICKET&gt;
+
+```
+==========================================================================
+BTE-915
+[TECH] Storage-Verschlüsselung der Datenbank aktivieren -- (4.5h)
+
+Assignee   Johannes Unger
+Reporter   Johannes Unger
+Estimate   4.5h
+Remaining  0h
+==========================================================================
+Als Entwickler möchte ich, dass die Datenbank und ihre Backups …
+
+## ACs
+
+1. Die Datenbank liegt auf verschlüsseltem Speicher
+2. automatisierte Backups sind verschlüsselt
+--------------------------------------------------------------------------
+Carolin Grandl 30.11.21 12:32
+
+- Kann die Urkundenanlage automatisiert aus dem Geltungsbereich entstehen?
+  NEIN, nicht im MVP
+◼
+```
+
+The key may be typed in lower case. Every comment is fetched, not just the first
+page. The width is fixed at 74 columns rather than read off the terminal, since
+the output is as often piped as read and a width that moves with the window
+makes two runs incomparable.
+
+The body comes out as Markdown, so it can go straight into a renderer:
+
+```bash
+myjira show BTE-915 --no-color | glow -
+```
+
+## Rich text: ADF, not HTML
+
+Jira Cloud stores descriptions and comments as **ADF** (Atlassian Document
+Format) — a JSON tree, not HTML. `/rest/api/3` hands that tree over as-is, so
+`adf.rs` walks it into Markdown. The alternative, asking for
+`expand=renderedFields` and parsing the HTML back apart, means recovering
+structure that was already there and losing it in the process.
+
+What maps to what:
+
+| ADF | Markdown |
+| --- | --- |
+| heading, paragraph, lists, code block, rule | the obvious spelling |
+| `strong`, `em`, `code`, `strike`, `link` marks | `**`, `*`, `` ` ``, `~~`, `[…](…)` |
+| `panel` (info/note/warning/…), `expand` | a blockquote under a bold label |
+| `table` | a Markdown table; the first row is the header, whether or not ADF said so |
+| `status` lozenge | `[OK]` |
+| `media` | `[Attachment: shot.png]`, from the node's `alt` |
+| `inlineCard`, `blockCard` | `<url>` |
+| `emoji`, `mention` | its character or `:short_name:`, and `@Name` |
+| `date` | a date rather than the millisecond count ADF carries |
+| `taskItem` | `- [x]` / `- [ ]` |
+
+Three decisions worth knowing:
+
+- **Text is not escaped.** The output is read in a terminal, where a backslash
+  in front of every `*` and `_` costs more than the rare sentence it protects.
+- **Underline, text colour and sub/superscript have no Markdown.** Their text
+  passes through unmarked rather than being dropped.
+- **An unknown node keeps its text.** ADF's node list is the most likely thing
+  here to change, and a node this doesn't recognise must not swallow the
+  sentence inside it.
+
 ## Notes on the endpoints
 
 Per org, `list-orgs` calls:
@@ -246,6 +317,12 @@ worth knowing:
 The project key is quoted in the JQL, since a key like `AND` is legal and would
 otherwise be read as an operator.
 
+`show` reads `/rest/api/3/issue/<KEY>` and pages
+`/rest/api/3/issue/<KEY>/comment` separately — comments arrive under `comments`
+rather than `values` and report a `total` instead of an `isLast`, which is why
+the offset paginator takes the row name and accepts either signal. Walking it by
+`isLast` alone stopped after the first page and silently lost the rest.
+
 `list-projects` uses `/rest/api/latest/project/search`, paged 50 at a time until
 it reports itself last, stepping by the page size the server actually used
 rather than the one asked for. On-premise Jira has no `/project/search`; a 404
@@ -277,4 +354,6 @@ a caller can tell a 404 or 400 from a real failure, that the offset paginator
 walks pages by the size the server used and the token paginator follows
 `nextPageToken` to the last page, and that query values are percent-encoded. The rest covers the `.env`
 format, org resolution (`--org` over `DEFAULT_ORG` over the only one), the
-board-ownership filter and the response parsing.
+board-ownership filter and the response parsing. The ADF renderer is tested
+node by node — nesting of marks, nested lists, tables with ragged rows, the
+inline chips, and that an unknown node keeps its text.

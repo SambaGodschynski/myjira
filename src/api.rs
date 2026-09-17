@@ -163,10 +163,17 @@ impl Session {
         Ok(all)
     }
 
-    // Every paginated Jira endpoint answers with the same envelope
-    // ({startAt, maxResults, isLast, values}), so walking it belongs here rather
-    // than in each command.
+    // The offset-paged envelope, under its usual name.
     pub async fn get_all(&self, url: &str, verbose: bool) -> Result<Vec<Value>, Error> {
+        self.get_all_rows(url, "values", verbose).await
+    }
+
+    // Most paginated Jira endpoints answer with {startAt, maxResults, isLast,
+    // values}, so walking that belongs here rather than in each command. Two
+    // things vary: the rows can be named something else (the comment endpoint
+    // calls them "comments") and isLast isn't always there — where it's missing,
+    // `total` says when to stop.
+    pub async fn get_all_rows(&self, url: &str, rows: &str, verbose: bool) -> Result<Vec<Value>, Error> {
         let separator = if url.contains('?') { '&' } else { '?' };
         let mut all = Vec::new();
         let mut start_at = 0u32;
@@ -177,13 +184,19 @@ impl Session {
                 eprintln!("GET {paged}");
             }
             let resp = self.get(&paged).await?;
-            let values = resp.get("values").and_then(Value::as_array).cloned().unwrap_or_default();
+            let values = resp.get(rows).and_then(Value::as_array).cloned().unwrap_or_default();
             let count = values.len();
             all.extend(values);
 
-            // Absent isLast means an endpoint that doesn't paginate at all, so
-            // what came back is everything.
-            if resp.get("isLast").and_then(Value::as_bool) != Some(false) || count == 0 {
+            let is_last = resp.get("isLast").and_then(Value::as_bool);
+            let total = resp.get("total").and_then(Value::as_u64);
+            let done = count == 0
+                || is_last == Some(true)
+                || total.is_some_and(|total| all.len() as u64 >= total)
+                // Neither signal: an endpoint that doesn't paginate at all, so
+                // what came back is everything.
+                || (is_last.is_none() && total.is_none());
+            if done {
                 break;
             }
             // The page size the server actually used, which may be smaller than

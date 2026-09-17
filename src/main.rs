@@ -17,10 +17,12 @@ macro_rules! outln {
     }};
 }
 
+mod adf;
 mod api;
 mod config;
 mod orgs;
 mod projects;
+mod show;
 mod sprints;
 mod tickets;
 
@@ -36,6 +38,7 @@ usage: myjira <command> [options]
   list-sprints <PROJECT>  list the sprints of a project's boards
   list-tickets <PROJECT> [<SPRINT ID>]
                           list a project's tickets, or only one sprint's
+  show <TICKET>           show one ticket: its fields, description and comments
 
 options:
       --org <name>        which org to act on (also --org=<name>). Without it:
@@ -141,7 +144,7 @@ async fn run() -> Result<(), Error> {
     // Silently ignoring a stray word would hide a typo the same way an unknown
     // flag would: `list-sprints BUA GDE` looks like it listed both.
     let expected = match words[0].as_str() {
-        "list-sprints" => 2,
+        "list-sprints" | "show" => 2,
         "list-tickets" => 3,
         _ => 1,
     };
@@ -154,6 +157,11 @@ async fn run() -> Result<(), Error> {
         "list-projects" => {
             let config = config::load(env_path.as_deref())?;
             projects::list(config.pick(org.as_deref())?, &opts).await
+        }
+        "show" => {
+            let ticket = words.get(1).ok_or("show needs a ticket key, e.g. myjira show BTE-915")?;
+            let config = config::load(env_path.as_deref())?;
+            show::show(config.pick(org.as_deref())?, ticket, &opts).await
         }
         "list-tickets" => {
             let project = words
