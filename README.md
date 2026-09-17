@@ -111,6 +111,8 @@ myjira list-orgs                    # the configured orgs, resolved live
 myjira list-projects                # the projects of DEFAULT_ORG
 myjira list-projects --org=gd       # …of that org instead
 myjira list-sprints BUA             # the sprints of that project's boards
+myjira list-tickets BUA             # every ticket in the project
+myjira list-tickets BUA 233         # only the ones in that sprint
 myjira list-projects --json         # the same as JSON
 myjira --help                       # all flags
 ```
@@ -174,6 +176,27 @@ this says `no sprints in HS` and exits 0 — the query worked, the answer is
 empty. A project key that doesn't exist is a different thing and fails with
 Jira's own words and a non-zero status.
 
+### list-tickets &lt;PROJECT&gt; [&lt;SPRINT ID&gt;]
+
+```
+KEY    PARENT  TYPE      STATUS                ASSIGNEE     SUMMARY
+BUA-1  -       Story     Ready for Acceptance  -            Datenbank-Umsetzung
+BUA-7  BUA-2   Sub-Task  In Implementation     -            Daily
+BUA-8  BUA-1   Sub-Task  Done                  Former user  QA
+```
+
+With a sprint id, only that sprint's tickets; without one, the whole project —
+which is what a Kanban project needs, having no sprints to name. `list-sprints`
+is where the ids come from. Ordered by key, by the server, so the issue number
+sorts numerically rather than as text. Finished work is dimmed and work in
+progress picked out, by status *category*, so it holds up on a board with
+custom status names. An unassigned ticket shows `-`.
+
+`PARENT` is the readable key of the ticket above this one — the story a sub-task
+belongs to, or, in a team-managed project, the epic. A ticket at the top of the
+hierarchy shows `-`, and the column is left out entirely when nothing in the
+result has a parent.
+
 ## Notes on the endpoints
 
 Per org, `list-orgs` calls:
@@ -204,6 +227,25 @@ A board that doesn't support sprints answers `400 The board does not support
 sprints`; that's read as "this board has none" and the remaining boards are still
 asked. `-v` prints both the skipped boards and that reason.
 
+`list-tickets` searches with JQL — `project = "<KEY>"`, plus `AND sprint = <id>`
+when one is given — through `/rest/api/3/search/jql`. Three things about it are
+worth knowing:
+
+- **`/rest/api/2/search` is gone**, answering `410` on Cloud. Anything written
+  against it (the older `jira-checklist-migrator` script, for one) no longer
+  runs.
+- **It pages by an opaque `nextPageToken`**, not by `startAt`, so it needs its
+  own walk alongside the offset one.
+- **It never objects.** An unknown project, an unknown sprint id and even
+  syntactically broken JQL all come back as `200` with an empty list — so a typo
+  would read as "this project has no tickets". Hence one call to
+  `/rest/api/3/project/<KEY>` and, when a sprint is named, one to
+  `/rest/agile/1.0/sprint/<id>` before searching: their answers are discarded
+  and their 404s are the point.
+
+The project key is quoted in the JQL, since a key like `AND` is legal and would
+otherwise be read as an operator.
+
 `list-projects` uses `/rest/api/latest/project/search`, paged 50 at a time until
 it reports itself last, stepping by the page size the server actually used
 rather than the one asked for. On-premise Jira has no `/project/search`; a 404
@@ -231,7 +273,8 @@ goes out verbatim, the rate-limit retry and its budget, the three shapes a dead
 session takes (`401`, a redirect to the login page, an HTML page where JSON was
 expected), that a Jira error message is lifted out of its envelope instead of
 being reported as a bare status, that a status stays recognisable as a number so
-a caller can tell a 404 or 400 from a real failure, and that the shared
-paginator walks pages by the size the server used. The rest covers the `.env`
+a caller can tell a 404 or 400 from a real failure, that the offset paginator
+walks pages by the size the server used and the token paginator follows
+`nextPageToken` to the last page, and that query values are percent-encoded. The rest covers the `.env`
 format, org resolution (`--org` over `DEFAULT_ORG` over the only one), the
 board-ownership filter and the response parsing.

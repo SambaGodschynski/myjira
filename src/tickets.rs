@@ -1,0 +1,274 @@
+use serde_json::{Value, json};
+
+use crate::api::{self, Session};
+use crate::config::Instance;
+use crate::projects;
+use crate::{BOLD, CYAN, DIM, Error, Opts, RESET, YELLOW, c};
+
+// Only what the table and the JSON show. Jira returns every field otherwise,
+// which for a few thousand issues is a lot of response to read and discard.
+const FIELDS: &str = "summary,status,issuetype,assignee,parent";
+
+struct Ticket {
+    key: String,
+    parent: Option<String>,
+    kind: String,
+    status: String,
+    status_category: String,
+    assignee: Option<String>,
+    summary: String,
+}
+
+pub async fn list(instance: &Instance, project: &str, sprint: Option<&str>, opts: &Opts) -> Result<(), Error> {
+    let key = projects::normalise_key(project)?;
+    let sprint = match sprint {
+        Some(raw) => Some(
+            raw.trim()
+                .parse::<u64>()
+                .map_err(|_| format!("a sprint id is a number, got {raw:?} — myjira list-sprints {key} lists them"))?,
+        ),
+        None => None,
+    };
+    let session = Session::new(&api::client(), instance.cookie.clone());
+
+    // The search endpoint never objects: an unknown project, an unknown sprint
+    // and even syntactically broken JQL all come back as 200 with an empty list.
+    // So a typo would read as "this project has no tickets". These two calls
+    // exist purely so it reads as the typo it is; their answers go unused.
+    if opts.verbose {
+        eprintln!("checking that {key} exists");
+    }
+    session.get(&project_url(&instance.url, &key)).await?;
+    if let Some(id) = sprint {
+        if opts.verbose {
+            eprintln!("checking that sprint {id} exists");
+        }
+        session
+            .get(&sprint_url(&instance.url, id))
+            .await
+            .map_err(|e| format!("sprint {id}: {e}"))?;
+    }
+
+    let issues = session
+        .get_all_by_token(&search_url(&instance.url, &key, sprint), "issues", opts.verbose)
+        .await?;
+    let tickets: Vec<Ticket> = issues.iter().filter_map(ticket_from).collect();
+
+    if opts.json {
+        let out: Vec<Value> = tickets
+            .iter()
+            .map(|t| {
+                json!({"key": t.key, "parent": t.parent, "type": t.kind, "status": t.status,
+                       "statusCategory": t.status_category, "assignee": t.assignee,
+                       "summary": t.summary})
+            })
+            .collect();
+        outln!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    if tickets.is_empty() {
+        match sprint {
+            Some(id) => eprintln!("no tickets in {key} sprint {id}"),
+            None => eprintln!("no tickets in {key}"),
+        }
+        return Ok(());
+    }
+    print_table(&tickets);
+    Ok(())
+}
+
+// Ordered by key on the server: it's the column you scan, and Jira sorts the
+// issue number numerically, which a sort on the formatted key would not.
+fn search_url(base: &str, key: &str, sprint: Option<u64>) -> String {
+    let mut jql = format!("project = \"{key}\"");
+    if let Some(id) = sprint {
+        jql.push_str(&format!(" AND sprint = {id}"));
+    }
+    jql.push_str(" ORDER BY key ASC");
+    format!("{base}/rest/api/3/search/jql?jql={}&fields={FIELDS}&maxResults=100", api::encode(&jql))
+}
+
+fn project_url(base: &str, key: &str) -> String {
+    format!("{base}/rest/api/3/project/{key}")
+}
+
+fn sprint_url(base: &str, id: u64) -> String {
+    format!("{base}/rest/agile/1.0/sprint/{id}")
+}
+
+fn ticket_from(v: &Value) -> Option<Ticket> {
+    let key = v.get("key").and_then(Value::as_str).filter(|s| !s.is_empty())?;
+    let fields = v.get("fields");
+    // Each of these is an object with a name, and any of them can be absent —
+    // an unassigned ticket has assignee: null, which is a normal state.
+    let named = |field: &str| {
+        fields
+            .and_then(|f| f.get(field))
+            .and_then(|o| o.get("name"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    Some(Ticket {
+        key: key.to_string(),
+        // The readable key rather than the numeric id. For a sub-task this is
+        // the story above it; in a team-managed project it's the epic.
+        parent: fields
+            .and_then(|f| f.get("parent"))
+            .and_then(|p| p.get("key"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        kind: named("issuetype").unwrap_or_default(),
+        status: named("status").unwrap_or_default(),
+        status_category: fields
+            .and_then(|f| f.get("status"))
+            .and_then(|s| s.get("statusCategory"))
+            .and_then(|c| c.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        assignee: fields
+            .and_then(|f| f.get("assignee"))
+            .and_then(|a| a.get("displayName"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        summary: fields
+            .and_then(|f| f.get("summary"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+fn print_table(tickets: &[Ticket]) {
+    let width = |header: &str, f: &dyn Fn(&Ticket) -> &str| {
+        tickets.iter().map(|t| f(t).chars().count()).max().unwrap_or(0).max(header.chars().count())
+    };
+    let key_w = width("KEY", &|t| &t.key);
+    // A flat project has nothing in this column, and a column of "-" says
+    // nothing worth the width.
+    let show_parent = tickets.iter().any(|t| t.parent.is_some());
+    let parent_w = width("PARENT", &|t| t.parent.as_deref().unwrap_or("-"));
+    let type_w = width("TYPE", &|t| &t.kind);
+    let status_w = width("STATUS", &|t| &t.status);
+    let assignee_w = width("ASSIGNEE", &|t| t.assignee.as_deref().unwrap_or("-"));
+
+    let mut header = format!("{}{:<key_w$}  ", c(BOLD), "KEY");
+    if show_parent {
+        header.push_str(&format!("{:<parent_w$}  ", "PARENT"));
+    }
+    header.push_str(&format!(
+        "{:<type_w$}  {:<status_w$}  {:<assignee_w$}  SUMMARY{}",
+        "TYPE",
+        "STATUS",
+        "ASSIGNEE",
+        c(RESET)
+    ));
+    outln!("{header}");
+    for t in tickets {
+        // Work that is finished is the least interesting thing in the list, so
+        // it's dimmed and what's in progress is picked out.
+        let status_colour = match t.status_category.as_str() {
+            "Done" => c(DIM),
+            "In Progress" => c(YELLOW),
+            _ => "",
+        };
+        let mut line = format!("{}{:<key_w$}{}  ", c(CYAN), t.key, c(RESET));
+        if show_parent {
+            line.push_str(&format!(
+                "{}{:<parent_w$}{}  ",
+                c(DIM),
+                t.parent.as_deref().unwrap_or("-"),
+                c(RESET)
+            ));
+        }
+        // The summary goes last and unpadded: it's the one column with no
+        // useful maximum width.
+        line.push_str(&format!(
+            "{:<type_w$}  {}{:<status_w$}{}  {:<assignee_w$}  {}",
+            t.kind,
+            status_colour,
+            t.status,
+            c(RESET),
+            t.assignee.as_deref().unwrap_or("-"),
+            t.summary,
+        ));
+        outln!("{line}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn the_jql_names_the_project_and_orders_by_key() {
+        let url = search_url("https://x.atlassian.net", "BUA", None);
+        assert!(url.contains("jql=project%20%3D%20%22BUA%22%20ORDER%20BY%20key%20ASC"), "got: {url}");
+        assert!(url.contains("fields=summary,status,issuetype,assignee,parent"), "got: {url}");
+    }
+
+    #[test]
+    fn a_sprint_is_added_to_the_jql_rather_than_filtered_afterwards() {
+        let url = search_url("https://x.atlassian.net", "BUA", Some(233));
+        assert!(url.contains("AND%20sprint%20%3D%20233"), "got: {url}");
+    }
+
+    // The key is quoted because a project key may collide with a JQL keyword.
+    #[test]
+    fn the_project_key_is_quoted_in_the_jql() {
+        let url = search_url("https://x.atlassian.net", "AND", None);
+        assert!(url.contains("%22AND%22"), "got: {url}");
+    }
+
+    #[test]
+    fn the_validation_urls_are_built_off_the_configured_base() {
+        assert_eq!(project_url("https://x.atlassian.net", "BUA"), "https://x.atlassian.net/rest/api/3/project/BUA");
+        assert_eq!(sprint_url("https://x.atlassian.net", 233), "https://x.atlassian.net/rest/agile/1.0/sprint/233");
+    }
+
+    #[test]
+    fn a_ticket_is_read_from_the_nested_fields_the_search_returns() {
+        let t = ticket_from(&json!({
+            "key": "BUA-1",
+            "fields": {
+                "summary": "Datenbank-Umsetzung",
+                "issuetype": {"name": "Story"},
+                "status": {"name": "Done", "statusCategory": {"name": "Done"}},
+                "assignee": {"displayName": "Johannes Unger"},
+                "parent": {"id": "37503", "key": "BUA-1", "fields": {"summary": "above"}}
+            }
+        }))
+        .expect("has a key");
+
+        assert_eq!((t.key.as_str(), t.kind.as_str(), t.status.as_str()), ("BUA-1", "Story", "Done"));
+        assert_eq!(t.status_category, "Done");
+        assert_eq!(t.assignee.as_deref(), Some("Johannes Unger"));
+        assert_eq!(t.summary, "Datenbank-Umsetzung");
+        // The readable key, not the numeric id that sits next to it.
+        assert_eq!(t.parent.as_deref(), Some("BUA-1"));
+    }
+
+    // A story at the top of the hierarchy has no parent, which is normal.
+    #[test]
+    fn a_ticket_without_a_parent_reads_as_absent() {
+        let t = ticket_from(&json!({"key": "BUA-1", "fields": {"summary": "x"}})).unwrap();
+        assert_eq!(t.parent, None);
+    }
+
+    // An unassigned ticket is a normal ticket, not a broken one.
+    #[test]
+    fn a_null_assignee_reads_as_absent() {
+        let t = ticket_from(&json!({"key": "BUA-2", "fields": {"summary": "x", "assignee": null}})).unwrap();
+        assert_eq!(t.assignee, None);
+    }
+
+    #[test]
+    fn an_entry_without_a_key_is_skipped_since_nothing_can_address_it() {
+        assert!(ticket_from(&json!({"fields": {"summary": "keyless"}})).is_none());
+    }
+}

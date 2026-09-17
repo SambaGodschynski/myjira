@@ -132,6 +132,37 @@ impl Session {
         }
     }
 
+    // The search endpoint pages by an opaque token instead of an offset, and
+    // carries its rows under a name of its own — so the offset walk above
+    // doesn't fit it.
+    pub async fn get_all_by_token(&self, url: &str, rows: &str, verbose: bool) -> Result<Vec<Value>, Error> {
+        let separator = if url.contains('?') { '&' } else { '?' };
+        let mut all = Vec::new();
+        let mut token: Option<String> = None;
+
+        for _ in 0..MAX_PAGES {
+            let paged = match &token {
+                Some(t) => format!("{url}{separator}nextPageToken={}", encode(t)),
+                None => url.to_string(),
+            };
+            if verbose {
+                eprintln!("GET {paged}");
+            }
+            let resp = self.get(&paged).await?;
+            let values = resp.get(rows).and_then(Value::as_array).cloned().unwrap_or_default();
+            let count = values.len();
+            all.extend(values);
+
+            token = resp.get("nextPageToken").and_then(Value::as_str).map(str::to_string);
+            // Either signal is enough to stop, and an empty page always is.
+            if resp.get("isLast").and_then(Value::as_bool) == Some(true) || token.is_none() || count == 0 {
+                break;
+            }
+        }
+
+        Ok(all)
+    }
+
     // Every paginated Jira endpoint answers with the same envelope
     // ({startAt, maxResults, isLast, values}), so walking it belongs here rather
     // than in each command.
@@ -163,6 +194,20 @@ impl Session {
 
         Ok(all)
     }
+}
+
+// Percent-encodes everything but the unreserved set, so a value can be put in a
+// query string without changing its meaning — JQL is full of spaces, "=" and
+// quotes.
+pub fn encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 // Jira reports what went wrong in a body of its own shape. Digging the sentence
@@ -400,6 +445,37 @@ mod tests {
     }
 
     // An endpoint that doesn't paginate omits isLast; one request is all of it.
+    #[test]
+    fn encoding_leaves_the_unreserved_set_alone_and_escapes_the_rest() {
+        assert_eq!(encode("BUA-1_x.y~z"), "BUA-1_x.y~z");
+        assert_eq!(encode(r#"project = "BUA""#), "project%20%3D%20%22BUA%22");
+        // Multi-byte characters are encoded per UTF-8 byte, not per character.
+        assert_eq!(encode("ä"), "%C3%A4");
+    }
+
+    #[tokio::test]
+    async fn token_pages_are_followed_until_the_last_one() {
+        let page = |rows: &str, rest: &str| response("200 OK", &format!(r#"{{"issues":[{rows}]{rest}}}"#));
+        let url = serve(vec![
+            page(r#"{"key":"A-1"}"#, r#","nextPageToken":"t1","isLast":false"#),
+            page(r#"{"key":"A-2"}"#, r#","isLast":true"#),
+        ])
+        .await;
+
+        let all = session().get_all_by_token(&url, "issues", false).await.unwrap();
+        let keys: Vec<&str> = all.iter().filter_map(|v| v.get("key").and_then(Value::as_str)).collect();
+        assert_eq!(keys, ["A-1", "A-2"]);
+    }
+
+    // No token means there is no page after this one, whatever isLast says.
+    #[tokio::test]
+    async fn a_token_page_without_a_next_token_ends_the_walk() {
+        let url = serve(vec![response("200 OK", r#"{"issues":[{"key":"A-1"}],"isLast":false}"#)]).await;
+
+        let all = session().get_all_by_token(&url, "issues", false).await.unwrap();
+        assert_eq!(all.len(), 1);
+    }
+
     #[tokio::test]
     async fn a_response_without_is_last_is_taken_as_complete() {
         let url = serve(vec![response("200 OK", r#"{"values":[{"id":1}]}"#)]).await;

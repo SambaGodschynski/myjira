@@ -88,6 +88,23 @@ fn project_from(v: &Value) -> Option<Project> {
     })
 }
 
+// Jira's key lookup is case-sensitive: `bua` answers "No project could be found
+// with key 'bua'" for a project that is plainly there. Since keys are upper-case
+// by construction, typing one in lower case is a spelling of the same thing
+// rather than a mistake to report.
+pub fn normalise_key(raw: &str) -> Result<String, Error> {
+    let key = raw.trim();
+    if key.is_empty() {
+        return Err("a project key is required, e.g. BUA".into());
+    }
+    // Also keeps the key from carrying anything of its own into the query string.
+    if !key.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        return Err(format!("{key:?} is not a project key — those are letters, digits and underscores").into());
+    }
+    // A numeric project id is accepted here too, and has no case to fix.
+    Ok(if key.chars().all(|ch| ch.is_ascii_digit()) { key.to_string() } else { key.to_uppercase() })
+}
+
 fn print_table(projects: &[Project]) {
     let width = |header: &str, f: &dyn Fn(&Project) -> &str| {
         projects.iter().map(|p| f(p).chars().count()).max().unwrap_or(0).max(header.chars().count())
@@ -129,6 +146,26 @@ mod tests {
         let base = "https://digitalklang.atlassian.net";
         assert_eq!(search_url(base), "https://digitalklang.atlassian.net/rest/api/latest/project/search");
         assert_eq!(all_url(base), "https://digitalklang.atlassian.net/rest/api/latest/project");
+    }
+
+    #[test]
+    fn a_lower_case_key_is_upper_cased_because_jiras_lookup_is_case_sensitive() {
+        assert_eq!(normalise_key("bua").unwrap(), "BUA");
+        assert_eq!(normalise_key(" gde ").unwrap(), "GDE");
+    }
+
+    // A project id is a legitimate argument to the same endpoint.
+    #[test]
+    fn a_numeric_id_is_left_as_it_is() {
+        assert_eq!(normalise_key("10178").unwrap(), "10178");
+    }
+
+    #[test]
+    fn a_key_that_could_carry_something_into_the_query_is_refused() {
+        for bad in ["BUA&x=1", "BUA/../x", "a b", "BUA?x"] {
+            assert!(normalise_key(bad).is_err(), "{bad:?} should be refused");
+        }
+        assert!(normalise_key("  ").is_err(), "an empty key should be refused");
     }
 
     #[test]

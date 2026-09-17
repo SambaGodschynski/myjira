@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 
 use crate::api::{self, Session};
 use crate::config::Instance;
+use crate::projects;
 use crate::{BOLD, CYAN, DIM, Error, Opts, RESET, c};
 
 struct Sprint {
@@ -18,7 +19,7 @@ struct Sprint {
 }
 
 pub async fn list(instance: &Instance, project: &str, opts: &Opts) -> Result<(), Error> {
-    let key = normalise_key(project)?;
+    let key = projects::normalise_key(project)?;
     let session = Session::new(&api::client(), instance.cookie.clone());
 
     // Sprints belong to boards, not to projects, and a project can have several
@@ -126,22 +127,6 @@ fn sprints_url(base: &str, board_id: u64) -> String {
     format!("{base}/rest/agile/1.0/board/{board_id}/sprint")
 }
 
-// Jira's key lookup is case-sensitive: `bua` answers "No project could be found
-// with key 'bua'" for a project that is plainly there. Since keys are upper-case
-// by construction, typing one in lower case is a spelling of the same thing
-// rather than a mistake to report.
-fn normalise_key(raw: &str) -> Result<String, Error> {
-    let key = raw.trim();
-    if key.is_empty() {
-        return Err("list-sprints needs a project key, e.g. myjira list-sprints BUA".into());
-    }
-    // Also keeps the key from carrying anything of its own into the query string.
-    if !key.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
-        return Err(format!("{key:?} is not a project key — those are letters, digits and underscores").into());
-    }
-    // A numeric project id is accepted here too, and has no case to fix.
-    Ok(if key.chars().all(|ch| ch.is_ascii_digit()) { key.to_string() } else { key.to_uppercase() })
-}
 
 fn state_rank(state: &str) -> u8 {
     match state {
@@ -230,26 +215,6 @@ fn print_table(sprints: &[Sprint]) {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn a_lower_case_key_is_upper_cased_because_jiras_lookup_is_case_sensitive() {
-        assert_eq!(normalise_key("bua").unwrap(), "BUA");
-        assert_eq!(normalise_key(" gde ").unwrap(), "GDE");
-    }
-
-    // A project id is a legitimate argument to the same endpoint.
-    #[test]
-    fn a_numeric_id_is_left_as_it_is() {
-        assert_eq!(normalise_key("10178").unwrap(), "10178");
-    }
-
-    #[test]
-    fn a_key_that_could_carry_something_into_the_query_is_refused() {
-        for bad in ["BUA&x=1", "BUA/../x", "a b", "BUA?x"] {
-            assert!(normalise_key(bad).is_err(), "{bad:?} should be refused");
-        }
-        assert!(normalise_key("  ").is_err(), "an empty key should be refused");
-    }
 
     #[test]
     fn the_urls_are_built_off_the_configured_base() {

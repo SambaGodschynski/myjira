@@ -22,6 +22,7 @@ mod config;
 mod orgs;
 mod projects;
 mod sprints;
+mod tickets;
 
 use std::sync::OnceLock;
 
@@ -33,6 +34,8 @@ usage: myjira <command> [options]
                           and the account your session belongs to
   list-projects           list the projects of one org
   list-sprints <PROJECT>  list the sprints of a project's boards
+  list-tickets <PROJECT> [<SPRINT ID>]
+                          list a project's tickets, or only one sprint's
 
 options:
       --org <name>        which org to act on (also --org=<name>). Without it:
@@ -49,6 +52,7 @@ pub const BOLD: &str = "\x1b[1m";
 pub const DIM: &str = "\x1b[2m";
 pub const CYAN: &str = "\x1b[36m";
 pub const RED: &str = "\x1b[31m";
+pub const YELLOW: &str = "\x1b[33m";
 pub const RESET: &str = "\x1b[0m";
 
 // Set once at startup: color is on by default, off with --no-color. (Tools like
@@ -136,7 +140,11 @@ async fn run() -> Result<(), Error> {
     let opts = Opts { verbose, json };
     // Silently ignoring a stray word would hide a typo the same way an unknown
     // flag would: `list-sprints BUA GDE` looks like it listed both.
-    let expected = if words[0] == "list-sprints" { 2 } else { 1 };
+    let expected = match words[0].as_str() {
+        "list-sprints" => 2,
+        "list-tickets" => 3,
+        _ => 1,
+    };
     if words.len() > expected {
         return Err(format!("unexpected argument: {}\n\n{USAGE}", words[expected]).into());
     }
@@ -146,6 +154,14 @@ async fn run() -> Result<(), Error> {
         "list-projects" => {
             let config = config::load(env_path.as_deref())?;
             projects::list(config.pick(org.as_deref())?, &opts).await
+        }
+        "list-tickets" => {
+            let project = words
+                .get(1)
+                .ok_or("list-tickets needs a project key, e.g. myjira list-tickets BUA [<sprint id>]")?;
+            let config = config::load(env_path.as_deref())?;
+            let instance = config.pick(org.as_deref())?;
+            tickets::list(instance, project, words.get(2).map(String::as_str), &opts).await
         }
         "list-sprints" => {
             let project = words
