@@ -21,6 +21,7 @@ mod api;
 mod config;
 mod orgs;
 mod projects;
+mod sprints;
 
 use std::sync::OnceLock;
 
@@ -31,6 +32,7 @@ usage: myjira <command> [options]
   list-orgs               list the configured orgs, with the flavour, cloud id
                           and the account your session belongs to
   list-projects           list the projects of one org
+  list-sprints <PROJECT>  list the sprints of a project's boards
 
 options:
       --org <name>        which org to act on (also --org=<name>). Without it:
@@ -132,12 +134,25 @@ async fn run() -> Result<(), Error> {
     }
 
     let opts = Opts { verbose, json };
+    // Silently ignoring a stray word would hide a typo the same way an unknown
+    // flag would: `list-sprints BUA GDE` looks like it listed both.
+    let expected = if words[0] == "list-sprints" { 2 } else { 1 };
+    if words.len() > expected {
+        return Err(format!("unexpected argument: {}\n\n{USAGE}", words[expected]).into());
+    }
 
     match words[0].as_str() {
         "list-orgs" => orgs::list(&config::load(env_path.as_deref())?, &opts).await,
         "list-projects" => {
             let config = config::load(env_path.as_deref())?;
             projects::list(config.pick(org.as_deref())?, &opts).await
+        }
+        "list-sprints" => {
+            let project = words
+                .get(1)
+                .ok_or("list-sprints needs a project key, e.g. myjira list-sprints BUA")?;
+            let config = config::load(env_path.as_deref())?;
+            sprints::list(config.pick(org.as_deref())?, project, &opts).await
         }
         other => Err(format!("unknown command: {other}\n\n{USAGE}").into()),
     }

@@ -6,6 +6,12 @@ use crate::Error;
 // told to us; these only bound the cases where it isn't, or where it never
 // lets up.
 const MAX_RATE_LIMIT_WAITS: u32 = 5;
+// Jira caps a page size well below what it accepts and reports the cap it used,
+// so this is a request rather than an assumption.
+const PAGE: u32 = 50;
+// A response that never reports itself as the last page would otherwise loop for
+// ever. 200 pages is far past any real instance.
+const MAX_PAGES: u32 = 200;
 const FALLBACK_RETRY_AFTER: u64 = 5;
 const MAX_RETRY_AFTER: u64 = 60;
 
@@ -42,7 +48,13 @@ pub struct HttpStatus {
 
 impl std::fmt::Display for HttpStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "HTTP {}{}", self.code, self.detail)
+        // Jira's own words first, where it gave any: "No project could be found
+        // with key 'bua'." is the answer, and "HTTP 400 Bad Request" is not.
+        if self.detail.is_empty() {
+            write!(f, "HTTP {}", self.code)
+        } else {
+            write!(f, "{} (HTTP {})", self.detail, self.code)
+        }
     }
 }
 
@@ -96,7 +108,7 @@ impl Session {
                 }
                 let body = response.text().await?;
                 if !status.is_success() {
-                    return Err(Box::new(HttpStatus { code: status.as_u16(), detail: snippet(&body) }));
+                    return Err(Box::new(HttpStatus { code: status.as_u16(), detail: detail(&body) }));
                 }
                 return serde_json::from_str(&body).map_err(|e| {
                     // HTML where JSON was expected is the other shape a dead
@@ -105,7 +117,7 @@ impl Session {
                     if body.trim_start().starts_with('<') {
                         EXPIRED.into()
                     } else {
-                        Error::from(format!("could not parse the response as JSON: {e}{}", snippet(&body)))
+                        Error::from(format!("could not parse the response as JSON: {e} — {}", snippet(&body)))
                     }
                 });
             }
@@ -119,6 +131,69 @@ impl Session {
             tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
         }
     }
+
+    // Every paginated Jira endpoint answers with the same envelope
+    // ({startAt, maxResults, isLast, values}), so walking it belongs here rather
+    // than in each command.
+    pub async fn get_all(&self, url: &str, verbose: bool) -> Result<Vec<Value>, Error> {
+        let separator = if url.contains('?') { '&' } else { '?' };
+        let mut all = Vec::new();
+        let mut start_at = 0u32;
+
+        for _ in 0..MAX_PAGES {
+            let paged = format!("{url}{separator}startAt={start_at}&maxResults={PAGE}");
+            if verbose {
+                eprintln!("GET {paged}");
+            }
+            let resp = self.get(&paged).await?;
+            let values = resp.get("values").and_then(Value::as_array).cloned().unwrap_or_default();
+            let count = values.len();
+            all.extend(values);
+
+            // Absent isLast means an endpoint that doesn't paginate at all, so
+            // what came back is everything.
+            if resp.get("isLast").and_then(Value::as_bool) != Some(false) || count == 0 {
+                break;
+            }
+            // The page size the server actually used, which may be smaller than
+            // the one asked for — stepping by PAGE would skip rows.
+            let step = resp.get("maxResults").and_then(Value::as_u64).unwrap_or(count as u64).max(1);
+            start_at += step as u32;
+        }
+
+        Ok(all)
+    }
+}
+
+// Jira reports what went wrong in a body of its own shape. Digging the sentence
+// out of it is the difference between an error a user can act on and one that
+// only says a request failed.
+fn detail(body: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<Value>(body) {
+        let messages = v
+            .get("errorMessages")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("; "))
+            .filter(|s| !s.is_empty());
+        if let Some(messages) = messages {
+            return messages;
+        }
+        // The per-field spelling, used by the create/edit endpoints.
+        if let Some(errors) = v.get("errors").and_then(Value::as_object) {
+            let joined = errors
+                .iter()
+                .filter_map(|(field, m)| m.as_str().map(|m| format!("{field}: {m}")))
+                .collect::<Vec<_>>()
+                .join("; ");
+            if !joined.is_empty() {
+                return joined;
+            }
+        }
+        if let Some(message) = v.get("message").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            return message.to_string();
+        }
+    }
+    snippet(body)
 }
 
 // reqwest reports "error sending request for url (…)" and keeps the reason —
@@ -142,14 +217,11 @@ fn with_cause(e: reqwest::Error) -> Error {
 // HTML page, and dumping one into the terminal buries the status it came with.
 fn snippet(body: &str) -> String {
     let line = body.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
-    if line.is_empty() {
-        return String::new();
-    }
     let mut out: String = line.chars().take(200).collect();
     if line.chars().count() > 200 {
         out.push('…');
     }
-    format!(" — {out}")
+    out
 }
 
 #[cfg(test)]
@@ -287,6 +359,53 @@ mod tests {
         let err = session().get(&url).await.expect_err("404 is an error");
         assert!(is_status(&err, 404), "should carry its status, got: {err}");
         assert!(!is_status(&err, 500), "should not match another status");
+    }
+
+    // Jira's sentence is the useful part of an error; the status alone is not.
+    #[tokio::test]
+    async fn a_jira_error_message_is_lifted_out_of_its_envelope() {
+        let body = r#"{"errorMessages":["No project could be found with key 'bua'."],"errors":{}}"#;
+        let url = serve(vec![response("400 Bad Request", body)]).await;
+
+        let err = session().get(&url).await.expect_err("400 is an error").to_string();
+        assert!(err.starts_with("No project could be found with key 'bua'."), "got: {err}");
+        assert!(err.contains("HTTP 400"), "the status should still be there, got: {err}");
+    }
+
+    #[tokio::test]
+    async fn the_per_field_error_spelling_is_read_too() {
+        let body = r#"{"errorMessages":[],"errors":{"summary":"Summary is required"}}"#;
+        let url = serve(vec![response("400 Bad Request", body)]).await;
+
+        let err = session().get(&url).await.expect_err("400 is an error").to_string();
+        assert!(err.contains("summary: Summary is required"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn pages_are_walked_until_the_last_one_and_stepped_by_the_size_the_server_used() {
+        let page = |start: u32, is_last: bool| {
+            response(
+                "200 OK",
+                &format!(
+                    r#"{{"startAt":{start},"maxResults":2,"isLast":{is_last},"values":[{{"id":{start}}},{{"id":{}}}]}}"#,
+                    start + 1
+                ),
+            )
+        };
+        let url = serve(vec![page(0, false), page(2, false), page(4, true)]).await;
+
+        let all = session().get_all(&url, false).await.unwrap();
+        let ids: Vec<u64> = all.iter().filter_map(|v| v.get("id").and_then(Value::as_u64)).collect();
+        assert_eq!(ids, [0, 1, 2, 3, 4, 5]);
+    }
+
+    // An endpoint that doesn't paginate omits isLast; one request is all of it.
+    #[tokio::test]
+    async fn a_response_without_is_last_is_taken_as_complete() {
+        let url = serve(vec![response("200 OK", r#"{"values":[{"id":1}]}"#)]).await;
+
+        let all = session().get_all(&url, false).await.unwrap();
+        assert_eq!(all.len(), 1);
     }
 
     #[tokio::test]

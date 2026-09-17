@@ -110,6 +110,7 @@ used with a `*`.
 myjira list-orgs                    # the configured orgs, resolved live
 myjira list-projects                # the projects of DEFAULT_ORG
 myjira list-projects --org=gd       # …of that org instead
+myjira list-sprints BUA             # the sprints of that project's boards
 myjira list-projects --json         # the same as JSON
 myjira --help                       # all flags
 ```
@@ -150,6 +151,29 @@ Output is meant to be piped; `fzf` wants to be told about the header row:
 myjira list-projects | fzf --ansi --header-lines=1
 ```
 
+### list-sprints &lt;PROJECT&gt;
+
+```
+ID   STATE   NAME                            START     END
+233  active  BUA Sprint 1 15.11. - 31.12.21  15.11.21  31.12.21
+```
+
+Active sprints first, then planned ones, then finished ones newest-first. A
+sprint that hasn't been scheduled shows `-` for its dates rather than a blank
+that looks like a bug. The project key may be typed in lower case — Jira's own
+lookup is case-sensitive and answers "No project could be found with key 'bua'"
+for a project that is plainly there, so the key is upper-cased first. A numeric
+project id works too.
+
+A `BOARD` column appears only when the sprints come from more than one board.
+
+**Kanban projects have no sprints**, and there is no equivalent level: a Kanban
+board's work isn't time-boxed at all. Its nearest relatives are the backlog and
+releases/versions, neither of which is an iteration. So for a Kanban project
+this says `no sprints in HS` and exits 0 — the query worked, the answer is
+empty. A project key that doesn't exist is a different thing and fails with
+Jira's own words and a non-zero status.
+
 ## Notes on the endpoints
 
 Per org, `list-orgs` calls:
@@ -161,6 +185,24 @@ Per org, `list-orgs` calls:
 | `/rest/api/3/serverInfo` | flavour (Cloud/Server) and version | readable anonymously |
 | `/_edge/tenant_info` | the cloud id | no; cloud only |
 | `/rest/api/latest/myself` | which account the session belongs to | yes |
+
+`list-sprints` goes through `/rest/agile/1.0/board?projectKeyOrId=<KEY>` and then
+`/rest/agile/1.0/board/<id>/sprint`, with two corrections that matter:
+
+- **Only boards the project owns.** `projectKeyOrId` answers with every board
+  whose filter reaches into the project. For `HS` that's four boards, three of
+  them owned by `UN` and `DRAG`, and taking their sprints meant `list-sprints HS`
+  reported hundreds of sprints for a Kanban project. Each board's `location` says
+  who owns it, and only those count.
+- **A sprint is collected once, by id.** Boards share sprints — GDE's two Scrum
+  boards both carry sprint 38 — so without this every sprint appeared once per
+  board that led to it. The `BOARD` column names a sprint's own board
+  (`originBoardId`) rather than whichever one it was reached through, since
+  several can be.
+
+A board that doesn't support sprints answers `400 The board does not support
+sprints`; that's read as "this board has none" and the remaining boards are still
+asked. `-v` prints both the skipped boards and that reason.
 
 `list-projects` uses `/rest/api/latest/project/search`, paged 50 at a time until
 it reports itself last, stepping by the page size the server actually used
@@ -187,7 +229,9 @@ cargo test
 The HTTP layer is tested against a canned TCP server: that the Cookie header
 goes out verbatim, the rate-limit retry and its budget, the three shapes a dead
 session takes (`401`, a redirect to the login page, an HTML page where JSON was
-expected), and that a status stays recognisable as a number so `list-projects`
-can tell a 404 from a real failure. The rest covers the `.env` format, org
-resolution (`--org` over `DEFAULT_ORG` over the only one) and the response
-parsing.
+expected), that a Jira error message is lifted out of its envelope instead of
+being reported as a bare status, that a status stays recognisable as a number so
+a caller can tell a 404 or 400 from a real failure, and that the shared
+paginator walks pages by the size the server used. The rest covers the `.env`
+format, org resolution (`--org` over `DEFAULT_ORG` over the only one), the
+board-ownership filter and the response parsing.

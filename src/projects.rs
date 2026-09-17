@@ -4,12 +4,6 @@ use crate::api::{self, Session};
 use crate::config::Instance;
 use crate::{BOLD, CYAN, DIM, Error, Opts, RESET, c};
 
-// Jira caps this well below what it will accept, and answers with the cap it
-// actually used — so this is a request, not an assumption.
-const PAGE: u32 = 50;
-// A page that never reports itself as the last one would otherwise loop for
-// ever. 200 pages is far past any real instance.
-const MAX_PAGES: u32 = 200;
 
 struct Project {
     key: String,
@@ -42,8 +36,8 @@ pub async fn list(instance: &Instance, opts: &Opts) -> Result<(), Error> {
     Ok(())
 }
 
-fn search_url(base: &str, start_at: u32) -> String {
-    format!("{base}/rest/api/latest/project/search?startAt={start_at}&maxResults={PAGE}")
+fn search_url(base: &str) -> String {
+    format!("{base}/rest/api/latest/project/search")
 }
 
 // The pre-pagination endpoint, which answers with every project as one array.
@@ -53,41 +47,19 @@ fn all_url(base: &str) -> String {
 }
 
 async fn fetch(session: &Session, instance: &Instance, opts: &Opts) -> Result<Vec<Project>, Error> {
-    let mut projects = Vec::new();
-    let mut start_at = 0;
-
-    for page in 0..MAX_PAGES {
-        let url = search_url(&instance.url, start_at);
-        if opts.verbose {
-            eprintln!("GET {url}");
-        }
-        let resp = match session.get(&url).await {
-            Ok(resp) => resp,
-            // Only worth falling back on the first page: a 404 midway through a
-            // paginated listing is something else entirely, and pretending
-            // otherwise would silently restart and duplicate what we have.
-            Err(e) if page == 0 && api::is_status(&e, 404) => {
-                if opts.verbose {
-                    eprintln!("no /project/search here — falling back to /project");
-                }
-                return fetch_all(session, instance, opts).await;
+    match session.get_all(&search_url(&instance.url), opts.verbose).await {
+        Ok(values) => Ok(values.iter().filter_map(project_from).collect()),
+        // On-premise Jira has no /project/search. The fallback replaces what
+        // was collected rather than adding to it, so it stays correct even if
+        // the 404 arrives partway through a paginated run.
+        Err(e) if api::is_status(&e, 404) => {
+            if opts.verbose {
+                eprintln!("no /project/search here — falling back to /project");
             }
-            Err(e) => return Err(e),
-        };
-
-        let values = resp.get("values").and_then(Value::as_array).cloned().unwrap_or_default();
-        projects.extend(values.iter().filter_map(project_from));
-
-        if resp.get("isLast").and_then(Value::as_bool) != Some(false) || values.is_empty() {
-            break;
+            fetch_all(session, instance, opts).await
         }
-        // The server's own page size, which may be smaller than the one asked
-        // for — stepping by PAGE instead would skip rows.
-        let step = resp.get("maxResults").and_then(Value::as_u64).unwrap_or(values.len() as u64);
-        start_at += step.max(1) as u32;
+        Err(e) => Err(e),
     }
-
-    Ok(projects)
 }
 
 async fn fetch_all(session: &Session, instance: &Instance, opts: &Opts) -> Result<Vec<Project>, Error> {
@@ -155,10 +127,7 @@ mod tests {
     #[test]
     fn the_urls_are_built_off_the_configured_base() {
         let base = "https://digitalklang.atlassian.net";
-        assert_eq!(
-            search_url(base, 100),
-            "https://digitalklang.atlassian.net/rest/api/latest/project/search?startAt=100&maxResults=50"
-        );
+        assert_eq!(search_url(base), "https://digitalklang.atlassian.net/rest/api/latest/project/search");
         assert_eq!(all_url(base), "https://digitalklang.atlassian.net/rest/api/latest/project");
     }
 
