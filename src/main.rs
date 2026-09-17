@@ -19,6 +19,7 @@ macro_rules! outln {
 
 mod adf;
 mod api;
+mod boards;
 mod config;
 mod orgs;
 mod projects;
@@ -36,8 +37,9 @@ usage: myjira <command> [options]
                           and the account your session belongs to
   list-projects           list the projects of one org
   list-sprints <PROJECT>  list the sprints of a project's boards
-  list-tickets <PROJECT> [<SPRINT ID>]
-                          list a project's tickets, or only one sprint's
+  list-tickets <PROJECT> [<SPRINT ID>|backlog]
+                          list a project's tickets, or only one sprint's, or
+                          the ones on its boards and in no sprint
   show <TICKET>           show one ticket: its fields, description and comments
 
 options:
@@ -166,7 +168,7 @@ async fn run() -> Result<(), Error> {
         "list-tickets" => {
             let project = words
                 .get(1)
-                .ok_or("list-tickets needs a project key, e.g. myjira list-tickets BUA [<sprint id>]")?;
+                .ok_or("list-tickets needs a project key, e.g. myjira list-tickets BUA [<sprint id>|backlog]")?;
             let config = config::load(env_path.as_deref())?;
             let instance = config.pick(org.as_deref())?;
             tickets::list(instance, project, words.get(2).map(String::as_str), &opts).await

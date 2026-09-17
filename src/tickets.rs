@@ -1,13 +1,27 @@
+use std::collections::BTreeMap;
+
 use serde_json::{Value, json};
 
 use crate::api::{self, Session};
+use crate::boards::{self, Board};
 use crate::config::Instance;
 use crate::projects;
+use crate::sprints::BACKLOG;
 use crate::{BOLD, CYAN, DIM, Error, Opts, RESET, YELLOW, c};
 
 // Only what the table and the JSON show. Jira returns every field otherwise,
 // which for a few thousand issues is a lot of response to read and discard.
 const FIELDS: &str = "summary,status,issuetype,assignee,parent";
+
+// What was asked for: the whole project, one sprint, or the backlog. The
+// backlog isn't a sprint and can't be expressed in JQL — `sprint IS EMPTY`
+// answers 8 for BUA where the board's own backlog holds 5 — so it comes from
+// the boards instead.
+enum Scope {
+    Project,
+    Sprint(u64),
+    Backlog,
+}
 
 struct Ticket {
     key: String,
@@ -21,13 +35,12 @@ struct Ticket {
 
 pub async fn list(instance: &Instance, project: &str, sprint: Option<&str>, opts: &Opts) -> Result<(), Error> {
     let key = projects::normalise_key(project)?;
-    let sprint = match sprint {
-        Some(raw) => Some(
-            raw.trim()
-                .parse::<u64>()
-                .map_err(|_| format!("a sprint id is a number, got {raw:?} — myjira list-sprints {key} lists them"))?,
-        ),
-        None => None,
+    let scope = match sprint {
+        None => Scope::Project,
+        Some(raw) if raw.trim().eq_ignore_ascii_case(BACKLOG) => Scope::Backlog,
+        Some(raw) => Scope::Sprint(raw.trim().parse::<u64>().map_err(|_| {
+            format!("a sprint id is a number or \"{BACKLOG}\", got {raw:?} — myjira list-sprints {key} lists them")
+        })?),
     };
     let session = Session::new(&api::client(), instance.cookie.clone());
 
@@ -38,8 +51,16 @@ pub async fn list(instance: &Instance, project: &str, sprint: Option<&str>, opts
     if opts.verbose {
         eprintln!("checking that {key} exists");
     }
-    session.get(&project_url(&instance.url, &key)).await?;
-    if let Some(id) = sprint {
+    if let Err(e) = session.get(&project_url(&instance.url, &key)).await {
+        // A project an anonymous caller may not see is a 404, not a 401, so
+        // "no such project" is what a dead cookie says about a project that is
+        // plainly there.
+        if api::is_status(&e, 404) && !session.is_authenticated(&instance.url).await {
+            return Err(api::expired());
+        }
+        return Err(e);
+    }
+    if let Scope::Sprint(id) = scope {
         if opts.verbose {
             eprintln!("checking that sprint {id} exists");
         }
@@ -49,10 +70,11 @@ pub async fn list(instance: &Instance, project: &str, sprint: Option<&str>, opts
             .map_err(|e| format!("sprint {id}: {e}"))?;
     }
 
-    let issues = session
-        .get_all_by_token(&search_url(&instance.url, &key, sprint), "issues", opts.verbose)
-        .await?;
-    let tickets: Vec<Ticket> = issues.iter().filter_map(ticket_from).collect();
+    let tickets = match scope {
+        Scope::Backlog => backlog(&session, &instance.url, &key, opts).await?,
+        Scope::Project => search(&session, &instance.url, &key, None, opts).await?,
+        Scope::Sprint(id) => search(&session, &instance.url, &key, Some(id), opts).await?,
+    };
 
     if opts.json {
         let out: Vec<Value> = tickets
@@ -68,14 +90,54 @@ pub async fn list(instance: &Instance, project: &str, sprint: Option<&str>, opts
     }
 
     if tickets.is_empty() {
-        match sprint {
-            Some(id) => eprintln!("no tickets in {key} sprint {id}"),
-            None => eprintln!("no tickets in {key}"),
+        match scope {
+            Scope::Sprint(id) => eprintln!("no tickets in {key} sprint {id}"),
+            Scope::Backlog => eprintln!("no tickets in the {key} backlog"),
+            Scope::Project => eprintln!("no tickets in {key}"),
         }
         return Ok(());
     }
     print_table(&tickets);
     Ok(())
+}
+
+async fn search(
+    session: &Session,
+    base: &str,
+    key: &str,
+    sprint: Option<u64>,
+    opts: &Opts,
+) -> Result<Vec<Ticket>, Error> {
+    let issues = session
+        .get_all_by_token(&search_url(base, key, sprint), "issues", opts.verbose)
+        .await?;
+    Ok(issues.iter().filter_map(ticket_from).collect())
+}
+
+// The backlog is per board, and the boards that have one share it — GDE's two
+// Scrum boards report the same 83 issues — so it's collected once by key. A
+// board without a backlog answers 400, the same way it does for sprints, and is
+// skipped rather than taken for a failure.
+async fn backlog(session: &Session, base: &str, key: &str, opts: &Opts) -> Result<Vec<Ticket>, Error> {
+    let mut seen: BTreeMap<String, Ticket> = BTreeMap::new();
+    for Board { id, name } in boards::own(session, base, key, opts).await? {
+        let url = format!("{}?fields={FIELDS}", boards::backlog_url(base, id));
+        match session.get_all_rows(&url, "issues", opts.verbose).await {
+            Ok(issues) => {
+                for issue in &issues {
+                    let Some(ticket) = ticket_from(issue) else { continue };
+                    seen.entry(ticket.key.clone()).or_insert(ticket);
+                }
+            }
+            Err(e) if api::is_status(&e, 400) => {
+                if opts.verbose {
+                    eprintln!("board {id} ({name}) has no backlog: {e}");
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(seen.into_values().collect())
 }
 
 // Ordered by key on the server: it's the column you scan, and Jira sorts the

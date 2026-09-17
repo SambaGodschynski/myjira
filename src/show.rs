@@ -16,7 +16,17 @@ pub async fn show(instance: &Instance, ticket: &str, opts: &Opts) -> Result<(), 
     if opts.verbose {
         eprintln!("GET {}", issue_url(&instance.url, &key));
     }
-    let issue = session.get(&issue_url(&instance.url, &key)).await?;
+    let issue = match session.get(&issue_url(&instance.url, &key)).await {
+        Ok(issue) => issue,
+        Err(e) => {
+            // "does not exist or you do not have permission to see it" is what
+            // Jira says to an anonymous caller about an issue that is there.
+            if api::is_status(&e, 404) && !session.is_authenticated(&instance.url).await {
+                return Err(api::expired());
+            }
+            return Err(e);
+        }
+    };
     let comments = session
         .get_all_rows(&comments_url(&instance.url, &key), "comments", opts.verbose)
         .await?;
@@ -59,10 +69,25 @@ pub async fn show(instance: &Instance, ticket: &str, opts: &Opts) -> Result<(), 
         return Ok(());
     }
 
-    let rule = |ch: char| outln!("{}{}{}", c(DIM), ch.to_string().repeat(WIDTH), c(RESET));
+    let bar = "-".repeat(WIDTH);
+    // Dashes are a horizontal rule in Markdown only with a blank line before
+    // them: directly under a line of text they turn that line into a heading
+    // instead — the same trap "=====" fell into, one level up.
+    let rule = || {
+        outln!("");
+        outln!("{}{}{}", c(DIM), bar, c(RESET));
+        outln!("");
+    };
 
-    rule('=');
-    outln!("{}{}{}", c(CYAN), key, c(RESET));
+    // The opening one needs no blank line above it, but it does need one below:
+    // a dashed line with text straight under it is how pandoc spells a table,
+    // and it swallowed the whole header block into one.
+    outln!("{}{}{}", c(DIM), bar, c(RESET));
+    outln!("");
+    // Two trailing spaces: consecutive lines are one paragraph in Markdown, so
+    // without a hard break a renderer runs the key, the summary and all four
+    // fields together onto a single line. Invisible in a terminal either way.
+    outln!("{}{}{}  ", c(CYAN), key, c(RESET));
     outln!("{}{}{}", c(BOLD), summary, c(RESET));
     outln!("");
     // Labelled, because two names and two durations in a row are otherwise
@@ -73,9 +98,9 @@ pub async fn show(instance: &Instance, ticket: &str, opts: &Opts) -> Result<(), 
         ("Estimate", time("originalEstimate")),
         ("Remaining", time("remainingEstimate")),
     ] {
-        outln!("{}{:<10}{} {}", c(DIM), label, c(RESET), value);
+        outln!("{}{:<10}{} {}  ", c(DIM), label, c(RESET), value);
     }
-    rule('=');
+    rule();
 
     if description.trim().is_empty() {
         outln!("{}(no description){}", c(DIM), c(RESET));
@@ -84,7 +109,7 @@ pub async fn show(instance: &Instance, ticket: &str, opts: &Opts) -> Result<(), 
     }
 
     for comment in &comments {
-        rule('-');
+        rule();
         let stamp = comment.get("created").and_then(Value::as_str).map(stamp).unwrap_or_default();
         outln!("{}{}{} {}{}{}", c(CYAN), author(comment), c(RESET), c(DIM), stamp, c(RESET));
         outln!("");
@@ -92,6 +117,8 @@ pub async fn show(instance: &Instance, ticket: &str, opts: &Opts) -> Result<(), 
         outln!("{body}");
     }
 
+    // Its own paragraph, or a renderer would fold it into the last comment.
+    outln!("");
     outln!("◼");
     Ok(())
 }

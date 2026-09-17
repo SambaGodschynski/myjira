@@ -60,6 +60,12 @@ impl std::fmt::Display for HttpStatus {
 
 impl std::error::Error for HttpStatus {}
 
+// The complaint an expired session deserves, for the callers that have to
+// recognise one for themselves.
+pub fn expired() -> Error {
+    EXPIRED.into()
+}
+
 // True when `e` is a non-success status with this code.
 pub fn is_status(e: &Error, code: u16) -> bool {
     e.downcast_ref::<HttpStatus>().is_some_and(|s| s.code == code)
@@ -161,6 +167,20 @@ impl Session {
         }
 
         Ok(all)
+    }
+
+    // Whether the cookie still authenticates anything.
+    //
+    // Jira serves an unauthenticated caller an anonymous view rather than a
+    // 401: /project/search answers 200 with no rows, and a project or issue it
+    // may not see comes back as 404. So "no projects visible", "no such
+    // project" and "your cookie died" are indistinguishable from the outside —
+    // except by asking who we are, which is the one call that needs the cookie.
+    //
+    // Only ever called once a result already looks empty or absent, so the
+    // normal path pays nothing for it.
+    pub async fn is_authenticated(&self, base: &str) -> bool {
+        self.get(&format!("{base}/rest/api/latest/myself")).await.is_ok()
     }
 
     // The offset-paged envelope, under its usual name.
@@ -364,6 +384,18 @@ mod tests {
         let err = err.to_string();
         assert!(err.contains("error sending request"), "got: {err}");
         assert!(err.len() > "error sending request for url (…)".len(), "the cause should be appended, got: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_live_session_is_recognised_and_a_dead_one_is_not() {
+        let ok = serve(vec![response("200 OK", r#"{"displayName":"Ada"}"#)]).await;
+        let dead = serve(vec![response("401 Unauthorized", r#"{"code":401}"#)]).await;
+        // serve() hands back a URL with a path; is_authenticated appends its own,
+        // which the canned server doesn't care about.
+        let base = |url: &str| url.trim_end_matches("/gateway/api/test").to_string();
+
+        assert!(session().is_authenticated(&base(&ok)).await);
+        assert!(!session().is_authenticated(&base(&dead)).await);
     }
 
     #[tokio::test]

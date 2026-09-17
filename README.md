@@ -60,6 +60,15 @@ It's a full session credential for your own account — don't share it, and keep
 the file out of the checkout (see Setup). When it expires, every command says so
 in as many words instead of failing obscurely; grab a fresh one the same way.
 
+That last part takes some doing, because Jira doesn't answer an unauthenticated
+caller with a `401`. It serves an anonymous view instead: `/project/search`
+returns `200` with no rows, and a project or issue the caller may not see comes
+back as `404`. Left alone, a dead cookie therefore reads as "no projects
+visible" or "No project could be found with key 'BUA'" — about a project that is
+plainly there. So wherever a result is empty or absent, the commands ask
+`/myself` who we are, and say the session expired when the answer is nobody.
+It's one extra call, only ever on a path that already had nothing to show.
+
 ### Dead ends, so they don't get retried
 
 - **`cloud.session.token` on `.atlassian.com`** authenticates your Atlassian
@@ -113,6 +122,7 @@ myjira list-projects --org=gd       # …of that org instead
 myjira list-sprints BUA             # the sprints of that project's boards
 myjira list-tickets BUA             # every ticket in the project
 myjira list-tickets BUA 233         # only the ones in that sprint
+myjira list-tickets BUA backlog     # the ones on its boards and in no sprint
 myjira show BTE-915                 # one ticket in full
 myjira list-projects --json         # the same as JSON
 myjira --help                       # all flags
@@ -157,11 +167,19 @@ myjira list-projects | fzf --ansi --header-lines=1
 ### list-sprints &lt;PROJECT&gt;
 
 ```
-ID   STATE   NAME                            START     END
-233  active  BUA Sprint 1 15.11. - 31.12.21  15.11.21  31.12.21
+ID       STATE    NAME                            START     END
+233      active   BUA Sprint 1 15.11. - 31.12.21  15.11.21  31.12.21
+backlog  backlog  Backlog (5)                     -         -
 ```
 
-Active sprints first, then planned ones, then finished ones newest-first. A
+The **backlog** sits among them, where Jira puts it: under the sprints still to
+come, above the ones already closed. It isn't a sprint — its id is the word
+itself, which `list-tickets <PROJECT> backlog` takes — but it's the other place
+a project's work lives, so leaving it out of this list only hid it. The count
+comes back with the row, so it's shown.
+
+Active sprints first, then planned ones, then the backlog, then finished ones
+newest-first. A
 sprint that hasn't been scheduled shows `-` for its dates rather than a blank
 that looks like a bug. The project key may be typed in lower case — Jira's own
 lookup is case-sensitive and answers "No project could be found with key 'bua'"
@@ -186,9 +204,10 @@ BUA-7  BUA-2   Sub-Task  In Implementation     -            Daily
 BUA-8  BUA-1   Sub-Task  Done                  Former user  QA
 ```
 
-With a sprint id, only that sprint's tickets; without one, the whole project —
-which is what a Kanban project needs, having no sprints to name. `list-sprints`
-is where the ids come from. Ordered by key, by the server, so the issue number
+With a sprint id, only that sprint's tickets; with `backlog`, what's on the
+project's boards and in no sprint; without either, the whole project — which is
+what a Kanban project needs, having no sprints to name. `list-sprints` is where
+the ids come from. Ordered by key, by the server, so the issue number
 sorts numerically rather than as text. Finished work is dimmed and work in
 progress picked out, by status *category*, so it holds up on a board with
 custom status names. An unassigned ticket shows `-`.
@@ -201,7 +220,8 @@ result has a parent.
 ### show &lt;TICKET&gt;
 
 ```
-==========================================================================
+--------------------------------------------------------------------------
+
 BTE-915
 [TECH] Storage-Verschlüsselung der Datenbank aktivieren -- (4.5h)
 
@@ -209,20 +229,39 @@ Assignee   Johannes Unger
 Reporter   Johannes Unger
 Estimate   4.5h
 Remaining  0h
-==========================================================================
+
+--------------------------------------------------------------------------
+
 Als Entwickler möchte ich, dass die Datenbank und ihre Backups …
 
 ## ACs
 
 1. Die Datenbank liegt auf verschlüsseltem Speicher
 2. automatisierte Backups sind verschlüsselt
+
 --------------------------------------------------------------------------
+
 Carolin Grandl 30.11.21 12:32
 
 - Kann die Urkundenanlage automatisiert aus dem Geltungsbereich entstehen?
   NEIN, nicht im MVP
+
 ◼
 ```
+
+The layout is valid Markdown, which took more than picking the right character
+for the rules. Checked against pandoc:
+
+- A rule needs a **blank line above** it. Dashes directly under a line of text
+  make that line a heading — `=====` turned the header into an `<h1>`, and
+  swapping in `-----` alone only moved it to `<h2>`.
+- The opening rule needs a blank line **below** it too: a dashed line with text
+  straight underneath is how pandoc spells a table, and it swallowed the whole
+  header block into one.
+- The key, the summary and the four fields carry **two trailing spaces**.
+  Consecutive lines are one paragraph in Markdown, so without that hard break a
+  renderer runs all six onto a single line. In a terminal it makes no
+  difference.
 
 The key may be typed in lower case. Every comment is fetched, not just the first
 page. The width is fixed at 74 columns rather than read off the terminal, since
@@ -234,6 +273,41 @@ The body comes out as Markdown, so it can go straight into a renderer:
 ```bash
 myjira show BTE-915 --no-color | glow -
 ```
+
+## x_jira: the whole thing under fzf
+
+`x_jira` in `~/Nextcloud/home/scripts/myscripts.sh` walks the commands above as
+one picker: projects, then that project's sprints where it has any, then
+tickets, then the ticket itself in nvim. Esc steps back exactly one level
+everywhere, so it needs two keys.
+
+```
+projects ──enter──> sprints ──enter──> tickets ──enter──> nvim
+   ^                   |                  |                |
+   └───────esc─────────┴────────esc───────┴──────:q────────┘
+```
+
+A project with no sprints skips that level altogether — its tickets are the only
+list there is, and esc from them goes straight back to the projects. `ctrl-a` on
+the sprint list asks for the project's tickets regardless of sprint, and
+`ctrl-r` reloads a list from Jira. The backlog row travels through the picker
+like any sprint, since its id is a word rather than a number.
+
+Three details in there are easy to get wrong:
+
+- **Each level's rows are fetched once and kept.** A project like ADS is 1370
+  tickets over fourteen requests; re-fetching them every time a ticket is closed
+  made the list feel broken. `ctrl-r` is the only thing that asks again.
+- **`--ansi` plus `--header-lines=1`.** The colours the commands emit survive
+  into the list, and fzf strips them back out of the line it prints, so the key
+  in the first column goes straight to the next command. Each command's own
+  column header becomes fzf's header: visible, not selectable.
+- **stderr is kept and shown when a level comes back empty.** fzf swallows it
+  otherwise — with nothing on stdin it just shows an empty list, which is how
+  "this sprint is empty" and "the cookie expired" came to look identical.
+
+Given arguments, `x_jira` just runs them (`x_jira list-projects`); the picker is
+what you get for asking for nothing in particular.
 
 ## Rich text: ADF, not HTML
 
@@ -297,6 +371,15 @@ Per org, `list-orgs` calls:
 A board that doesn't support sprints answers `400 The board does not support
 sprints`; that's read as "this board has none" and the remaining boards are still
 asked. `-v` prints both the skipped boards and that reason.
+
+The **backlog** comes from `/rest/agile/1.0/board/<id>/backlog`, and not from
+JQL, because the two don't agree: `project = "BUA" AND sprint IS EMPTY` answers
+8 where the board's own backlog holds 5. The board leaves out what it doesn't
+show, and the board is what "the backlog" means. It's per board and the boards
+that have one share it — GDE's two Scrum boards report the same 83 issues — so
+it's one row for the project and the issues are collected once by key. A board
+without a backlog says `400 Backlogs are not supported on this board`, which is
+handled exactly like the sprint case.
 
 `list-tickets` searches with JQL — `project = "<KEY>"`, plus `AND sprint = <id>`
 when one is given — through `/rest/api/3/search/jql`. Three things about it are

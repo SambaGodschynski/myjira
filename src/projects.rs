@@ -29,6 +29,11 @@ pub async fn list(instance: &Instance, opts: &Opts) -> Result<(), Error> {
     }
 
     if projects.is_empty() {
+        // Anonymous callers are served an empty list, not a 401, so an empty
+        // answer is the shape a dead cookie takes here.
+        if !session.is_authenticated(&instance.url).await {
+            return Err(api::expired());
+        }
         eprintln!("no projects visible to this account on {}", instance.name);
         return Ok(());
     }
