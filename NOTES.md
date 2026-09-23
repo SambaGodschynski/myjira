@@ -128,6 +128,28 @@ So wherever a result is empty or absent, the commands ask `/myself` who we are
 and say the session expired when the answer is nobody. One extra call, only ever
 on a path that already had nothing to show.
 
+## The mirror has no sprint level
+
+`--mirror` writes `<root>/<PROJECT>/<TICKET>.md` and nothing else, because a
+ticket key carries both levels and needs no lookup. `show` and `list-tickets`
+write the same file, from the same renderer, so the two can't drift apart.
+
+A sprint level was tried and taken out again: it can't be had cheaply.
+
+- `/rest/api/3/search/jql` **silently drops a requested `sprint` field**. Asking
+  for `fields=summary,sprint` returns `summary` alone, with no error, so the
+  tickets of a whole project arrive with no sprint at all.
+- `/rest/agile/1.0/issue/<KEY>` does know, and reports a finished sprint under
+  `closedSprints` where `sprint` is null. But its `description` comes back as a
+  string rather than ADF, so it can't replace the `/rest/api/3/issue` call —
+  only follow it, at one extra request per ticket.
+- Nothing distinguishes "in the backlog" from "on no board at all": both report
+  `sprint: null`.
+
+Directory names still go through a slug, which matters more than it looks: it is
+the one place where text becomes a path, and a key is the only thing that ever
+reaches it by design.
+
 ## Rich text: ADF, not HTML
 
 Jira Cloud stores descriptions and comments as **ADF** (Atlassian Document

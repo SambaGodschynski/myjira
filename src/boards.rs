@@ -74,7 +74,7 @@ mod tests {
             board(12, "Unicorns Board", "UN"),
             board(15, "Unicorns Board", "DRAG"),
         ];
-        let opts = Opts { verbose: false, json: false };
+        let opts = Opts { verbose: false, json: false, mirror: None };
 
         let own = own_boards(&boards, "HS", &opts);
         assert_eq!(own.len(), 1);
@@ -84,7 +84,7 @@ mod tests {
     #[test]
     fn a_numeric_project_id_matches_the_location_id() {
         let boards = vec![board(4, "HS Board", "HS")];
-        let opts = Opts { verbose: false, json: false };
+        let opts = Opts { verbose: false, json: false, mirror: None };
 
         assert_eq!(own_boards(&boards, "10178", &opts).len(), 1);
     }
@@ -94,7 +94,7 @@ mod tests {
     #[test]
     fn a_board_without_a_location_is_not_claimed_by_the_project() {
         let boards = vec![json!({"id": 9, "name": "Nowhere Board", "type": "scrum"})];
-        let opts = Opts { verbose: false, json: false };
+        let opts = Opts { verbose: false, json: false, mirror: None };
 
         assert!(own_boards(&boards, "HS", &opts).is_empty());
     }

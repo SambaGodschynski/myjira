@@ -5,13 +5,18 @@ use serde_json::{Value, json};
 use crate::api::{self, Session};
 use crate::boards::{self, Board};
 use crate::config::Instance;
+use crate::mirror::Mirror;
 use crate::projects;
+use crate::show;
 use crate::sprints::BACKLOG;
 use crate::{BOLD, CYAN, DIM, Error, Opts, RESET, YELLOW, c};
 
 // Only what the table and the JSON show. Jira returns every field otherwise,
 // which for a few thousand issues is a lot of response to read and discard.
 const FIELDS: &str = "summary,status,issuetype,assignee,parent";
+// How often a long mirror says where it's got to. Two calls per ticket means a
+// large project takes minutes, and silence for minutes reads as a hang.
+const PROGRESS_EVERY: usize = 25;
 
 // What was asked for: the whole project, one sprint, or the backlog. The
 // backlog isn't a sprint and can't be expressed in JQL — `sprint IS EMPTY`
@@ -70,6 +75,7 @@ pub async fn list(instance: &Instance, project: &str, sprint: Option<&str>, opts
             .map_err(|e| format!("sprint {id}: {e}"))?;
     }
 
+
     let mut tickets = match scope {
         Scope::Backlog => backlog(&session, &instance.url, &key, opts).await?,
         Scope::Project => search(&session, &instance.url, &key, None, opts).await?,
@@ -91,18 +97,61 @@ pub async fn list(instance: &Instance, project: &str, sprint: Option<&str>, opts
             })
             .collect();
         outln!("{}", serde_json::to_string_pretty(&out)?);
-        return Ok(());
-    }
-
-    if tickets.is_empty() {
+    } else if tickets.is_empty() {
         match scope {
             Scope::Sprint(id) => eprintln!("no tickets in {key} sprint {id}"),
             Scope::Backlog => eprintln!("no tickets in the {key} backlog"),
             Scope::Project => eprintln!("no tickets in {key}"),
         }
-        return Ok(());
+    } else {
+        print_table(&tickets);
     }
-    print_table(&tickets);
+
+    // After the listing is on screen, not before: the download is the slow part
+    // and there's no reason to make the list wait behind it.
+    if let Some(mirror) = &opts.mirror {
+        mirror_all(&session, &instance.url, &tickets, mirror, opts).await?;
+    }
+    Ok(())
+}
+
+// Each ticket costs two calls — the issue and its comments — which is why this
+// only happens when it's asked for. A ticket that can't be read is reported and
+// skipped: one of those is no reason to abandon the rest of a long run.
+async fn mirror_all(
+    session: &Session,
+    base: &str,
+    tickets: &[Ticket],
+    mirror: &Mirror,
+    opts: &Opts,
+) -> Result<(), Error> {
+    let total = tickets.len();
+    let mut written = 0usize;
+    let mut failed = 0usize;
+
+    for (index, ticket) in tickets.iter().enumerate() {
+        match show::render(session, base, &ticket.key, opts).await {
+            Ok(document) => {
+                let file = mirror.write_ticket(&ticket.key, &document)?;
+                written += 1;
+                if opts.verbose {
+                    eprintln!("mirrored {}", file.display());
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!("{}: {e}", ticket.key);
+            }
+        }
+        if !opts.verbose && (index + 1) % PROGRESS_EVERY == 0 && index + 1 < total {
+            eprintln!("mirrored {}/{total} tickets...", index + 1);
+        }
+    }
+
+    match failed {
+        0 => eprintln!("mirrored {written} ticket(s)"),
+        _ => eprintln!("mirrored {written} ticket(s), {failed} could not be read"),
+    }
     Ok(())
 }
 

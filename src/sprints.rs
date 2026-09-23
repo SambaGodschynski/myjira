@@ -135,6 +135,7 @@ pub async fn list(instance: &Instance, project: &str, opts: &Opts) -> Result<(),
         return Ok(());
     }
     print_table(&rows);
+
     Ok(())
 }
 

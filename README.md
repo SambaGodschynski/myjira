@@ -87,8 +87,9 @@ myjira show BTE-915                 # one ticket in full
 myjira --help                       # all flags
 ```
 
-Global flags: `--org <name>`, `--json`, `-v/--verbose`, `--no-color`,
-`--env <file>`. Project and ticket keys may be typed in lower case.
+Global flags: `--org <name>`, `--mirror <dir>`, `--json`, `-v/--verbose`,
+`--no-color`, `--env <file>`. Project and ticket keys may be typed in lower
+case.
 
 ### `list-orgs`
 
@@ -194,6 +195,29 @@ as `[OK]`. So the output goes straight into a renderer:
 ```bash
 myjira show BTE-915 --no-color | glow -
 ```
+
+### `--mirror <dir>`
+
+Also writes each loaded ticket to disk, so it can be grepped, diffed or opened
+later without asking Jira again. The file is exactly what `show` prints:
+
+```bash
+myjira show BTE-915 --mirror ~/jira          # one ticket
+myjira list-tickets BUA 233 --mirror ~/jira  # every ticket in the sprint
+# ~/jira/BUA/BUA-1.md, ~/jira/BUA/BUA-2.md, …
+```
+
+The ticket key says both levels — `BTE-915` is project `BTE` — so nothing has to
+be looked up, and there is no sprint level. **Write-only, and it never deletes.**
+An existing file is overwritten without asking, since being current is the
+point, but nothing is removed.
+
+With `list-tickets` this fetches every ticket in the listing, at two calls
+apiece, which is why it only happens when asked for: a sprint of 83 took about
+half a minute, and a project of 1370 would be closer to ten. Progress is
+reported as it goes, a ticket that can't be read is named and skipped rather
+than ending the run, and the listing itself prints before the download starts.
+Other commands say the flag doesn't apply rather than ignoring it.
 
 ### Piping
 

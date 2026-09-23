@@ -21,6 +21,7 @@ mod adf;
 mod api;
 mod boards;
 mod config;
+mod mirror;
 mod orgs;
 mod projects;
 mod show;
@@ -45,6 +46,10 @@ usage: myjira <command> [options]
 options:
       --org <name>        which org to act on (also --org=<name>). Without it:
                           DEFAULT_ORG, or the only org configured.
+      --mirror <dir>      also write each loaded ticket to
+                          <dir>/<PROJECT>/<TICKET>.md. With list-tickets that
+                          fetches every listed ticket, two calls apiece.
+                          Write-only — files are overwritten, never deleted.
       --json              print the result as JSON instead of a table
       --env <file>        read the configuration from this file
                           (default: ~/.config/myjira/.env)
@@ -78,6 +83,8 @@ pub fn c(code: &'static str) -> &'static str {
 pub struct Opts {
     pub verbose: bool,
     pub json: bool,
+    // Where to mirror what was loaded, if anywhere.
+    pub mirror: Option<mirror::Mirror>,
 }
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -99,6 +106,7 @@ async fn run() -> Result<(), Error> {
     let mut json = false;
     let mut env_path: Option<String> = None;
     let mut org: Option<String> = None;
+    let mut mirror_root: Option<String> = None;
     // The group/command pair, e.g. ("org", "list"). Collected positionally so
     // flags can sit on either side of it.
     let mut words: Vec<String> = Vec::new();
@@ -114,6 +122,12 @@ async fn run() -> Result<(), Error> {
             }
             other if other.starts_with("--env=") => {
                 env_path = Some(other.trim_start_matches("--env=").to_string());
+            }
+            "--mirror" => {
+                mirror_root = Some(args.next().ok_or("missing directory for --mirror (e.g. --mirror=~/jira)")?);
+            }
+            other if other.starts_with("--mirror=") => {
+                mirror_root = Some(other.trim_start_matches("--mirror=").to_string());
             }
             "--org" => {
                 org = Some(args.next().ok_or("missing value for --org (e.g. --org=digitalklang)")?);
@@ -142,7 +156,12 @@ async fn run() -> Result<(), Error> {
         return Ok(());
     }
 
-    let opts = Opts { verbose, json };
+    let opts = Opts { verbose, json, mirror: mirror_root.as_deref().map(mirror::Mirror::new) };
+    // Said rather than ignored: a flag that silently does nothing hides a typo
+    // the same way an unknown one would. Only a ticket has content to write.
+    if opts.mirror.is_some() && words[0] != "show" && words[0] != "list-tickets" {
+        eprintln!("--mirror only applies to show and list-tickets — nothing was written");
+    }
     // Silently ignoring a stray word would hide a typo the same way an unknown
     // flag would: `list-sprints BUA GDE` looks like it listed both.
     let expected = match words[0].as_str() {
