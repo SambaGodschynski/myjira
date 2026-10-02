@@ -14,6 +14,8 @@
 # them — X_JIRA_BIN to an absolute target/release/myjira if it isn't on PATH:
 X_JIRA_BIN=${X_JIRA_BIN:-myjira}
 X_JIRA_ENV=${X_JIRA_ENV:-$HOME/.config/myjira/.env}
+# Where a ticket read through the picker is kept, as <dir>/<PROJECT>/<KEY>.md.
+X_JIRA_MIRROR=${X_JIRA_MIRROR:-$HOME/jira}
 
 # ---------------------------------------------------------------------------
 # x_jira — one walk through Jira: projects, then that project's sprints where it
@@ -39,7 +41,8 @@ _x_jira_fzf()
 {
   local header=$1
   shift
-  fzf --ansi --no-sort --style minimal --header-lines=1 --header "$header" "$@"
+  fzf --ansi --no-sort --style minimal --header-lines=1 \
+      --header "$header" --header-border=top "$@"
 }
 
 # The first column of a picked line: project key, sprint id or ticket key, which
@@ -92,7 +95,9 @@ _x_jira_open()
   local ticket=$1 err=$2 file rc=0
   file=$(mktemp --suffix=.md -t "$ticket-XXXXXX") || return 1
   : > "$err"
-  if "$X_JIRA_BIN" --env "$X_JIRA_ENV" show "$ticket" --no-color > "$file" 2>"$err"; then
+  # Quoted: an empty X_JIRA_MIRROR would otherwise let --mirror swallow the
+  # --env that follows it and take the path as its directory.
+  if "$X_JIRA_BIN" --mirror="$X_JIRA_MIRROR" --env "$X_JIRA_ENV" show "$ticket" --no-color > "$file" 2>"$err"; then
     nvim -R "$file"
   else
     _x_jira_note "$err"
