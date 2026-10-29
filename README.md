@@ -36,7 +36,7 @@ one named cookie out of it:
 2. Open DevTools (F12) → **Network** tab, then reload the page.
 3. Click the first `GET` request (the document itself) → **Headers** →
    **Request Headers** → copy the entire value of `Cookie:`. It looks like
-   `_ga=GA1.1.…; JSESSIONID=…; atlassian.xsrf.token=…; tenant.session.token=…`.
+   `ajs_anonymous_id.....`.
 4. Paste it into `~/.config/myjira/.env` as `JIRA_COOKIE=…`, exactly as copied.
 
 ```bash
@@ -139,10 +139,33 @@ status.
 ### `list-tickets <PROJECT> [<SPRINT ID>|backlog]`
 
 ```
-KEY    PARENT  TYPE      STATUS                ASSIGNEE     SUMMARY
-BUA-1  -       Story     Ready for Acceptance  -            Datenbank-Umsetzung
-BUA-7  BUA-2   Sub-Task  In Implementation     -            Daily
+KEY    PARENT  TYPE      SUMMARY                 ST    ASSIGNEE
+BUA-1  -       Story     Datenbank-Umsetzung     RAcc  -
+BUA-7  BUA-2   Sub-Task  Daily                   IImp  Erika Mustermann
 ```
+
+What identifies a ticket comes first and what describes it last, so a terminal
+too narrow for the whole line cuts off the assignee rather than the summary. The
+summary is capped at 60 characters, marked with `…` where it is cut — the median
+here is under 30, so most are untouched.
+
+`ST` is the status as a four-character code, built from the name rather than
+looked up: words that carry no meaning are dropped, a name that fits is kept
+whole, a single word is cut, and otherwise the initials are used, padded out of
+the last word when there are too few.
+
+| | | | |
+| --- | --- | --- | --- |
+| `Done` ← Done | `Open` ← Open | `Back` ← Backlog | `Esti` ← Estimated |
+| `RGro` ← Ready for Grooming | `RRef` ← Ready for Refinement | `RAcc` ← Ready for Acceptance | `RCRe` ← Ready for Code Review |
+| `IImp` ← In Implementation | `IRew` ← In Rewriting | `IRef` ← In Refinement | `IGro` ← In Grooming |
+| `ToDo` ← To Do | `InQA` ← In QA | `SDev` ← Selected for Development | `SBRQ` ← Sub-Bug: Ready for QA |
+
+Four characters rather than two because two collide: `In Rewriting` and
+`In Refinement` both reduce to `IR`, and six of the twenty statuses in this Jira
+begin with `Ready for`. A table kept by hand would have been wrong the first
+time an administrator invented a status; this rule produced twenty-seven
+distinct codes for the twenty real statuses plus seven invented to strain it.
 
 With a sprint id, only that sprint's tickets; with `backlog`, what's on the
 project's boards and in no sprint; without either, the whole project — which is

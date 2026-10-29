@@ -17,6 +17,16 @@ const FIELDS: &str = "summary,status,issuetype,assignee,parent";
 // How often a long mirror says where it's got to. Two calls per ticket means a
 // large project takes minutes, and silence for minutes reads as a hang.
 const PROGRESS_EVERY: usize = 25;
+// Caps for the two columns that have no natural width. A summary runs to any
+// length, and this Jira has statuses like "Ready for Estimation/Planning" —
+// 29 characters that push everything after them off a small screen.
+const MAX_SUMMARY: usize = 60;
+// The status as a code of this many characters. Four rather than two because
+// two collide: of the twenty statuses in this Jira, "In Rewriting" and
+// "In Refinement" both reduce to IR, and six of them begin with "Ready for".
+// At four, twenty-seven statuses — the real twenty plus seven invented to
+// strain the rule — all come out distinct.
+const STATUS_CODE: usize = 4;
 
 // What was asked for: the whole project, one sprint, or the backlog. The
 // backlog isn't a sprint and can't be expressed in JQL — `sprint IS EMPTY`
@@ -279,21 +289,29 @@ fn print_table(tickets: &[Ticket]) {
     let show_parent = tickets.iter().any(|t| t.parent.is_some());
     let parent_w = width("PARENT", &|t| t.parent.as_deref().unwrap_or("-"));
     let type_w = width("TYPE", &|t| &t.kind);
-    let status_w = width("STATUS", &|t| &t.status);
-    let assignee_w = width("ASSIGNEE", &|t| t.assignee.as_deref().unwrap_or("-"));
+    // Capped rather than fitted: these two are what make a line too wide for a
+    // small screen, and a cut-off word still reads.
+    let summary_w = width("SUMMARY", &|t| &t.summary).min(MAX_SUMMARY);
+    // The header is what sets this column's width; a code is never wider.
+    let status_w = STATUS_CODE.max("ST".len());
 
+    // What identifies a ticket comes first and what describes it last, so a
+    // narrow terminal cuts off the status and the assignee rather than the
+    // summary. That order is why the summary is padded at all: columns after it
+    // only line up if it has a width.
     let mut header = format!("{}{:<key_w$}  ", c(BOLD), "KEY");
     if show_parent {
         header.push_str(&format!("{:<parent_w$}  ", "PARENT"));
     }
     header.push_str(&format!(
-        "{:<type_w$}  {:<status_w$}  {:<assignee_w$}  SUMMARY{}",
+        "{:<type_w$}  {:<summary_w$}  {:<status_w$}  ASSIGNEE{}",
         "TYPE",
-        "STATUS",
-        "ASSIGNEE",
+        "SUMMARY",
+        "ST",
         c(RESET)
     ));
     outln!("{header}");
+
     for t in tickets {
         // Work that is finished is the least interesting thing in the list, so
         // it's dimmed and what's in progress is picked out.
@@ -311,19 +329,69 @@ fn print_table(tickets: &[Ticket]) {
                 c(RESET)
             ));
         }
-        // The summary goes last and unpadded: it's the one column with no
-        // useful maximum width.
+        // The assignee goes last and unpadded: it is the one column nothing
+        // follows, so a width would only add trailing blanks.
         line.push_str(&format!(
-            "{:<type_w$}  {}{:<status_w$}{}  {:<assignee_w$}  {}",
+            "{:<type_w$}  {:<summary_w$}  {}{:<status_w$}{}  {}",
             t.kind,
+            cut(&t.summary, summary_w),
             status_colour,
-            t.status,
+            status_code(&t.status),
             c(RESET),
             t.assignee.as_deref().unwrap_or("-"),
-            t.summary,
         ));
         outln!("{line}");
     }
+}
+
+// A short code for a status, built rather than looked up: a Jira administrator
+// invents statuses whenever they like, and a hand-kept table would be wrong the
+// first time one of them did.
+//
+// Words that carry no meaning in a status name are dropped, and then, in order:
+// a name that fits whole is used whole ("To Do" -> ToDo, "In QA" -> InQA); a
+// single word is cut ("Backlog" -> Back); otherwise the initials, padded out of
+// the last word when there are too few of them — which is what tells
+// "In Rewriting" (IRew) from "In Refinement" (IRef).
+fn status_code(status: &str) -> String {
+    const FILLER: [&str; 5] = ["for", "by", "the", "of", "and"];
+    let words: Vec<&str> = status
+        .split(|ch: char| !ch.is_alphabetic())
+        .filter(|w| !w.is_empty() && !FILLER.contains(&w.to_lowercase().as_str()))
+        .collect();
+    let Some(last) = words.last() else { return cut_hard(status, STATUS_CODE) };
+
+    let joined: String = words.concat();
+    if joined.chars().count() <= STATUS_CODE {
+        return joined;
+    }
+    if words.len() == 1 {
+        return cut_hard(words[0], STATUS_CODE);
+    }
+    let initials: String = words.iter().filter_map(|w| w.chars().next()).collect();
+    if initials.chars().count() >= STATUS_CODE {
+        return cut_hard(&initials, STATUS_CODE);
+    }
+    // One initial short of the width, so the last word fills the rest.
+    let keep = initials.chars().count() - 1;
+    let head: String = initials.chars().take(keep).collect();
+    let tail: String = last.chars().take(STATUS_CODE - keep).collect();
+    format!("{head}{tail}")
+}
+
+fn cut_hard(text: &str, width: usize) -> String {
+    text.chars().take(width).collect()
+}
+
+// Cuts to `width` characters, marking the cut. The ellipsis takes the place of
+// a character rather than being added to the end, so the column keeps its width
+// — which is the only reason the columns after it line up.
+fn cut(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(width.saturating_sub(1)).collect();
+    format!("{}…", kept.trim_end())
 }
 
 #[cfg(test)]
@@ -359,6 +427,63 @@ mod tests {
 
     // The bug this fixes: the backlog was collected into a map keyed by the
     // whole key, so GDE-102 came before GDE-11.
+    // Four characters, because two collide: "In Rewriting" and "In Refinement"
+    // both reduce to IR, and six statuses here begin with "Ready for".
+    #[test]
+    fn a_status_becomes_a_code_of_four_characters() {
+        for (status, code) in [
+            ("Done", "Done"),
+            ("Open", "Open"),
+            ("Backlog", "Back"),
+            ("Ready for Grooming", "RGro"),
+            ("Ready for Acceptance", "RAcc"),
+            ("Ready for Code Review", "RCRe"),
+            ("Ready for Estimation/Planning", "REPl"),
+            ("In Implementation", "IImp"),
+            ("Selected for Development", "SDev"),
+            ("Sub-Bug: Ready for QA", "SBRQ"),
+            // Short enough to keep whole, which reads better than initials.
+            ("To Do", "ToDo"),
+            ("In QA", "InQA"),
+        ] {
+            assert_eq!(status_code(status), code, "{status:?}");
+        }
+    }
+
+    // The pair that two letters cannot tell apart.
+    #[test]
+    fn statuses_that_start_alike_still_differ() {
+        assert_eq!(status_code("In Rewriting"), "IRew");
+        assert_eq!(status_code("In Refinement"), "IRef");
+        assert_ne!(status_code("Ready for Refinement"), status_code("In Refinement"));
+    }
+
+    // An administrator can call a status anything, including nothing useful.
+    #[test]
+    fn an_unusual_status_still_yields_something() {
+        assert_eq!(status_code(""), "");
+        assert_eq!(status_code("---"), "---");
+        assert_eq!(status_code("Won't Do"), "WtDo");
+        assert!(status_code("Rückmeldung").chars().count() <= 4);
+    }
+
+    #[test]
+    fn a_long_value_is_cut_and_marked_without_growing_the_column() {
+        assert_eq!(cut("kurz", 10), "kurz");
+        assert_eq!(cut("genau zehn", 10), "genau zehn");
+        // The ellipsis replaces a character, so the result still fits.
+        assert_eq!(cut("etwas deutlich laengeres", 10).chars().count(), 10);
+        assert_eq!(cut("etwas deutlich laengeres", 10), "etwas deu…");
+        // Umlauts count as one character, not as their bytes.
+        assert_eq!(cut("Rückmeldung zur Schätzung", 12).chars().count(), 12);
+    }
+
+    // A cut that lands on a space would otherwise leave "wort …".
+    #[test]
+    fn a_cut_does_not_leave_a_dangling_space_before_the_ellipsis() {
+        assert_eq!(cut("abcdefgh ijkl", 10), "abcdefgh…");
+    }
+
     #[test]
     fn tickets_sort_by_number_and_not_by_its_digits() {
         let mut keys = ["GDE-11", "GDE-102", "GDE-2", "GDE-10", "GDE-1"];
